@@ -1,0 +1,147 @@
+name: KiCad CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - alpha
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  fetch-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install semantic-release dependencies
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/alpha'
+        run: |
+          npm install @semantic-release/github @semantic-release/exec @semantic-release/changelog @semantic-release/git -D
+
+      - name: Fetch semantic version (dry-run)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/alpha'
+        run: |
+          npx semantic-release --generate-notes false --dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate non-semantic version
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/alpha'
+        run: |
+          echo "build-${{ github.run_number }}" > VERSION.txt
+
+      - name: Set version output
+        id: set-version
+        run: |
+          if [ -f VERSION.txt ]; then
+            echo "version=$(cat VERSION.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "version=0.0.0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload VERSION.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: version
+          path: VERSION.txt
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: fetch-version
+    container:
+      image: ghcr.io/inti-cmnb/kicad7_auto:1.6.2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version
+
+      - name: Run KiBot tests
+        run: |
+          if [ -f *.kicad_pcb ]; then
+            kibot -c test.kibot.yaml
+          fi
+
+  generate-fabrication:
+    runs-on: ubuntu-latest
+    needs: tests
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/alpha'
+    container:
+      image: ghcr.io/inti-cmnb/kicad7_auto:1.6.2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version
+
+      - name: Generate fabrication files
+        run: |
+          if [ -f *.kicad_pcb ]; then
+            kibot -c output.kibot.yaml
+          fi
+
+      - name: Upload fabrication artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabrication-files
+          path: Fabrication/
+
+  release:
+    runs-on: ubuntu-latest
+    needs: generate-fabrication
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/alpha'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Download version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version
+
+      - name: Download fabrication artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: fabrication-files
+          path: Fabrication/
+
+      - name: Install semantic-release dependencies
+        run: |
+          npm install @semantic-release/github @semantic-release/exec @semantic-release/changelog @semantic-release/git -D
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
